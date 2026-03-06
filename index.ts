@@ -1,55 +1,150 @@
+import axios from "axios";
 import * as dotenv from "dotenv";
+import * as fs from "fs";
+import * as path from "path";
 dotenv.config();
 
-const e = (key: string, fallback?: string): string => {
-  const val = process.env[key] ?? fallback;
-  if (val === undefined) throw new Error(`Missing env var: ${key}`);
-  return val;
+const CONFIG = {
+  email:         process.env.TEMPLE_EMAIL!,
+  password:      process.env.TEMPLE_PASSWORD!,
+  baseUrl:       "https://api.templedigitalgroup.com",
+  pair:          "CC-USDCx",
+  gridLevels:    5,
+  gridStep:      0.0001,
+  orderQty:      35,
+  checkInterval: 60 * 60 * 1000,
+  dryRun:        process.env.DRY_RUN !== "false",
 };
 
-export const config = {
-  // ── Temple Auth ──────────────────────────────────────────
-  temple: {
-    email: e("TEMPLE_EMAIL"),
-    password: e("TEMPLE_PASSWORD"),
-    restUrl: e("TEMPLE_REST_URL", "https://api.templedigitalgroup.com"),
-    wsUrl: e("TEMPLE_WS_URL", "wss://api.templedigitalgroup.com/ws"),
-  },
+const logDir = "logs";
+if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+const logFile = fs.createWriteStream(path.join(logDir, "bot.log"), { flags: "a" });
 
-  // ── Trading ──────────────────────────────────────────────
-  trading: {
-    pairs: e("TRADING_PAIRS", "BTC-USDCx,ETH-USDCx").split(",").map(s => s.trim()),
-    candleInterval: e("CANDLE_INTERVAL", "5m"),
-    orderSizeUsd: parseFloat(e("ORDER_SIZE_USD", "1000")),
-    maxTotalExposureUsd: parseFloat(e("MAX_TOTAL_EXPOSURE_USD", "50000")),
-    maxDailyLossUsd: parseFloat(e("MAX_DAILY_LOSS_USD", "2000")),
-    stopLossPct: parseFloat(e("STOP_LOSS_PCT", "2.0")),
-    takeProfitPct: parseFloat(e("TAKE_PROFIT_PCT", "4.0")),
-    limitSlippageBps: 5,
-    maxOpenPositions: 10,
-  },
+function log(level: string, msg: string) {
+  const line = `${new Date().toISOString()} | ${level.padEnd(5)} | ${msg}`;
+  console.log(line);
+  logFile.write(line + "\n");
+}
+const info  = (m: string) => log("INFO", m);
+const warn  = (m: string) => log("WARN", m);
+const error = (m: string) => log("ERROR", m);
 
-  // ── MA Strategy ──────────────────────────────────────────
-  strategy: {
-    maType: e("MA_TYPE", "ema") as "ema" | "sma",
-    fastPeriod: parseInt(e("FAST_PERIOD", "9")),
-    slowPeriod: parseInt(e("SLOW_PERIOD", "21")),
-    minCrossoverGapPct: 0.05,
-    useRsiFilter: e("USE_RSI_FILTER", "true") === "true",
-    rsiPeriod: 14,
-    rsiOversold: 35,
-    rsiOverbought: 65,
-    useVolumeFilter: e("USE_VOLUME_FILTER", "true") === "true",
-    volumeMaPeriod: 20,
-    volumeMultiplier: 1.2,
-    historicalCandleCount: 200,
-  },
+let accessToken  = "";
+let refreshToken = "";
 
-  // ── Operational ──────────────────────────────────────────
-  dryRun: e("DRY_RUN", "true") === "true",
-  logLevel: e("LOG_LEVEL", "info"),
-  heartbeatIntervalMs: 30_000,
-  tokenRefreshBufferMs: 60_000, // refresh token 1 min before expiry
-} as const;
+const http = axios.create({ baseURL: CONFIG.baseUrl, timeout: 10_000 });
+http.interceptors.request.use((req) => {
+  if (accessToken) req.headers["Authorization"] = `Bearer ${accessToken}`;
+  return req;
+});
 
-export type Config = typeof config;
+async function login(): Promise<void> {
+  info("Temple'a giriş yapılıyor...");
+  const { data } = await http.post("/auth/login", {
+    email:    CONFIG.email,
+    password: CONFIG.password,
+  });
+  accessToken  = data.accessToken;
+  refreshToken = data.refreshToken;
+  info(`Giriş başarılı. Token süresi: ${data.expiresIn}s`);
+  setTimeout(async () => {
+    try {
+      const r = await http.post("/auth/refresh-token", { refreshToken });
+      accessToken  = r.data.accessToken;
+      refreshToken = r.data.refreshToken ?? refreshToken;
+      info("Token yenilendi.");
+    } catch {
+      warn("Token yenileme başarısız, yeniden giriş yapılıyor...");
+      await login();
+    }
+  }, Math.max((data.expiresIn - 60) * 1000, 5000));
+}
+
+async function getOraclePrice(): Promise<number> {
+  const { data } = await http.get(`/market/ticker/${CONFIG.pair}`);
+  const price = data.oraclePrice ?? data.oracle_price ?? data.lastPrice ?? data.last_price;
+  if (!price) throw new Error(`Oracle fiyatı bulunamadı: ${JSON.stringify(data)}`);
+  return parseFloat(price);
+}
+
+async function getActiveOrders(): Promise<{ orderId: string; price: number; side: string }[]> {
+  const { data } = await http.get("/orders/active", { params: { symbol: CONFIG.pair } });
+  return (Array.isArray(data) ? data : data.orders ?? []).map((o: Record<string, unknown>) => ({
+    orderId: o.orderId ?? o.id,
+    price:   parseFloat(String(o.price)),
+    side:    o.side,
+  }));
+}
+
+async function cancelAllOrders(): Promise<void> {
+  if (CONFIG.dryRun) { info("[DRY RUN] Tüm emirler iptal edildi (simülasyon)"); return; }
+  await http.post("/orders/cancel-all", { symbol: CONFIG.pair });
+  info("Tüm emirler iptal edildi.");
+}
+
+async function placeOrder(side: "buy" | "sell", price: number): Promise<void> {
+  const priceStr = price.toFixed(4);
+  if (CONFIG.dryRun) { info(`[DRY RUN] ${side.toUpperCase()} 35 CC @ ${priceStr}`); return; }
+  await http.post("/orders", {
+    symbol: CONFIG.pair, side, type: "limit",
+    quantity: CONFIG.orderQty.toString(), price: priceStr, postOnly: true,
+  });
+  info(`Emir verildi: ${side.toUpperCase()} 35 CC @ ${priceStr}`);
+}
+
+async function placeGridOrders(oraclePrice: number): Promise<void> {
+  info(`Oracle: ${oraclePrice} | Grid yerleştiriliyor...`);
+  const promises: Promise<void>[] = [];
+  for (let i = 1; i <= CONFIG.gridLevels; i++) {
+    const buyPrice  = parseFloat((oraclePrice - i * CONFIG.gridStep).toFixed(4));
+    const sellPrice = parseFloat((oraclePrice + i * CONFIG.gridStep).toFixed(4));
+    promises.push(placeOrder("buy",  buyPrice));
+    promises.push(placeOrder("sell", sellPrice));
+  }
+  await Promise.all(promises);
+  info(`${CONFIG.gridLevels * 2} emir yerleştirildi.`);
+}
+
+async function updateGrid(): Promise<void> {
+  info("─".repeat(50));
+  try {
+    const oraclePrice  = await getOraclePrice();
+    const activeOrders = await getActiveOrders();
+    info(`Oracle: ${oraclePrice} | Aktif emir: ${activeOrders.length}`);
+    const expected = CONFIG.gridLevels * 2;
+    if (activeOrders.length < expected) {
+      info(`Eksik emir (${activeOrders.length}/${expected}) → yeniden yerleştiriliyor`);
+      await cancelAllOrders();
+      await placeGridOrders(oraclePrice);
+    } else {
+      const prices    = activeOrders.map(o => o.price).sort((a, b) => a - b);
+      const midPrice  = (prices[0] + prices[prices.length - 1]) / 2;
+      const drift     = Math.abs(midPrice - oraclePrice);
+      const threshold = CONFIG.gridStep * 2;
+      if (drift > threshold) {
+        info(`Fiyat kaydı ${drift.toFixed(4)} > ${threshold} → revize ediliyor`);
+        await cancelAllOrders();
+        await placeGridOrders(oraclePrice);
+      } else {
+        info(`Grid güncel. Sapma: ${drift.toFixed(4)}`);
+      }
+    }
+  } catch (err) {
+    error(`Hata: ${err}`);
+  }
+}
+
+async function main(): Promise<void> {
+  info("═".repeat(50));
+  info("  CC-TempleTrade — Oracle Grid Bot");
+  info(`  Parite: ${CONFIG.pair} | Adım: ${CONFIG.gridStep} | Miktar: ${CONFIG.orderQty} CC`);
+  info(`  Mod: ${CONFIG.dryRun ? "DRY RUN" : "CANLI"}`);
+  info("═".repeat(50));
+  await login();
+  await updateGrid();
+  setInterval(() => updateGrid(), CONFIG.checkInterval);
+  process.on("SIGINT",  async () => { await cancelAllOrders(); process.exit(0); });
+  process.on("SIGTERM", async () => { await cancelAllOrders(); process.exit(0); });
+}
+
+main().catch((err) => { error(`Kritik hata: ${err}`); process.exit(1); });
