@@ -28,22 +28,17 @@ function log(level: string, msg: string) {
 const info  = (m: string) => log("INFO", m);
 const error = (m: string) => log("ERROR", m);
 
-// ── Telegram ──────────────────────────────────────────────────────────────────
-
 async function tg(msg: string): Promise<void> {
   if (!CONFIG.tgToken || !CONFIG.tgChatId) return;
   try {
     await axios.post(`https://api.telegram.org/bot${CONFIG.tgToken}/sendMessage`, {
       chat_id: CONFIG.tgChatId,
       text: msg,
-      
     });
   } catch (e) {
     error(`TG mesaj hatasi: ${e}`);
   }
 }
-
-// ── Telegram Bot Polling ──────────────────────────────────────────────────────
 
 let botRunning = true;
 let lastUpdateId = 0;
@@ -58,6 +53,7 @@ async function handleCommands(): Promise<void> {
       const text = update.message?.text?.trim().toLowerCase();
       const chatId = String(update.message?.chat?.id);
       if (chatId !== CONFIG.tgChatId) continue;
+
       if (text === "/stop") {
         botRunning = false;
         await tg("Bot durduruldu. Yeniden baslatmak icin /start gonder.");
@@ -69,6 +65,13 @@ async function handleCommands(): Promise<void> {
         await updateGrid();
       } else if (text === "/status") {
         await sendStatus();
+      } else if (text === "/dryrun") {
+        CONFIG.dryRun = !CONFIG.dryRun;
+        const modMsg = CONFIG.dryRun
+          ? "DRY RUN modu ACIK. Emirler gercek degil."
+          : "CANLI mod ACIK. Emirler gercek!";
+        await tg(modMsg);
+        info(`TG: Mod degistirildi -> ${CONFIG.dryRun ? "DRY RUN" : "CANLI"}`);
       }
     }
   } catch (e) {
@@ -92,15 +95,14 @@ async function sendStatus(): Promise<void> {
     for (const o of buys)  msg += `  BUY  @ ${o.price}\n`;
     for (const o of sells) msg += `  SELL @ ${o.price}\n`;
     if (orders.length === 0) msg += `  Acik emir yok\n`;
+    msg += `\nKomutlar: /start /stop /dryrun /status`;
     await tg(msg);
   } catch (e) {
     await tg(`Durum alinamadi: ${e}`);
   }
 }
 
-// ── Order ─────────────────────────────────────────────────────────────────────
-
-let appHttp = axios.create({ baseURL: "https://api.templedigitalgroup.com", timeout: 10_000 });
+const appHttp = axios.create({ baseURL: "https://api.templedigitalgroup.com", timeout: 10_000 });
 
 async function placeOrder(side: "buy" | "sell", price: number): Promise<void> {
   const priceStr = price.toFixed(4);
@@ -124,8 +126,6 @@ async function placeGridOrders(oraclePrice: number): Promise<void> {
   info(`${CONFIG.gridLevels * 2} emir yerleştirildi.`);
 }
 
-// ── Grid Update ───────────────────────────────────────────────────────────────
-
 let lastKnownOrders: any[] = [];
 
 async function updateGrid(): Promise<void> {
@@ -141,7 +141,6 @@ async function updateGrid(): Promise<void> {
     const currentOrders = ordersData?.orders ?? [];
     info(`Aktif emir: ${currentOrders.length}`);
 
-    // Gerceklesen emirleri tespit et
     const currentIds = new Set(currentOrders.map((o: any) => o.id || o.orderId || o.order_id));
     const filledOrders = lastKnownOrders.filter((o: any) => !currentIds.has(o.id || o.orderId || o.order_id));
 
@@ -151,9 +150,7 @@ async function updateGrid(): Promise<void> {
 
     if (filledOrders.length > 0) {
       tgMsg += `Gerceklesen Emirler (${filledOrders.length}):\n`;
-      for (const o of filledOrders) {
-        tgMsg += `  ${o.side?.toUpperCase()} @ ${o.price}\n`;
-      }
+      for (const o of filledOrders) tgMsg += `  ${o.side?.toUpperCase()} @ ${o.price}\n`;
       tgMsg += "\n";
     }
 
@@ -200,11 +197,9 @@ async function updateGrid(): Promise<void> {
   }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
-
 async function main(): Promise<void> {
   info("==================================================");
-  info("  CC-TempleTrade -- Oracle Grid Bot v4");
+  info("  CC-TempleTrade -- Oracle Grid Bot v5");
   info(`  Parite: ${CONFIG.pair} | Adim: ${CONFIG.gridStep} | Miktar: ${CONFIG.orderQty} CC`);
   info(`  Mod: ${CONFIG.dryRun ? "DRY RUN" : "CANLI"}`);
   info("==================================================");
@@ -216,7 +211,7 @@ async function main(): Promise<void> {
   });
   info("SDK baslatildi.");
 
-  await tg(`CC-TempleTrade baslatildi\nMod: ${CONFIG.dryRun ? "DRY RUN" : "CANLI"}\n/status ile durum sor, /stop ile durdur.`);
+  await tg(`CC-TempleTrade baslatildi\nMod: ${CONFIG.dryRun ? "DRY RUN" : "CANLI"}\nKomutlar: /status /stop /start /dryrun`);
 
   await updateGrid();
   setInterval(() => updateGrid(), CONFIG.checkInterval);
