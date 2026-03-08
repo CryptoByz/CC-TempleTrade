@@ -1,116 +1,100 @@
-# Temple Digital Group — Trading Bot v2
-### Canton Network | TypeScript | Official API
+# CC-TempleTrade — Oracle Grid Bot
 
-Production-ready algorithmic trading bot using **Temple Digital Group's official API** (`api.templedigitalgroup.com`). Built with the real endpoints documented at `apidocs.templedigitalgroup.com`.
+Temple Digital Group üzerinde CC/USDCx paritesi için otomatik grid trading botu.
 
----
+## Nasıl Çalışır?
 
-## Architecture
+Bot, oracle fiyatı etrafına simetrik alış/satış emirleri açar. Her saat başı fiyatı kontrol eder, gerekirse grid'i yeniden düzenler. Telegram üzerinden izlenir ve yönetilir.
 
-```
-temple-bot-v2/
-│
-├── src/
-│   ├── index.ts              ← Entry point
-│   ├── bot.ts                ← Main orchestrator
-│   ├── logger.ts             ← Winston logger
-│   │
-│   ├── api/
-│   │   └── client.ts         ← Temple REST + WebSocket client (official endpoints)
-│   │
-│   ├── strategy/
-│   │   └── ma.ts             ← MA Crossover + RSI + Volume filter
-│   │
-│   ├── risk/
-│   │   └── manager.ts        ← Position sizing, SL/TP, circuit breaker
-│   │
-│   └── core/
-│       └── executor.ts       ← Order placement + dry-run mode
-│
-├── config/
-│   └── index.ts              ← Centralised config from .env
-│
-├── .env.example              ← Environment template
-├── package.json
-└── tsconfig.json
-```
+**Örnek (oracle fiyat: 0.1496):**
+- BUY  @ 0.1495
+- SELL @ 0.1497
+- BUY  @ 0.1494
+- SELL @ 0.1498
 
----
+## Gereksinimler
 
-## Temple API Endpoints Used
+- Node.js v18+
+- npm
+- Temple Digital Group hesabı (KYC onaylı)
+- Telegram botu (BotFather'dan alınır)
 
-| Method | Endpoint | Purpose |
-|--------|----------|---------|
-| `POST` | `/auth/login` | Email/password → JWT |
-| `POST` | `/auth/refresh-token` | Refresh access token |
-| `GET` | `/market/ticker/:symbol` | Live ticker |
-| `GET` | `/market/orderbook/:symbol` | Order book depth |
-| `GET` | `/market/candles/:symbol` | OHLCV candles |
-| `GET` | `/market/recent-trades/:symbol` | Recent trades |
-| `GET` | `/market/symbol-config/:symbol` | Min qty, tick size |
-| `GET` | `/orders/active` | Open orders |
-| `POST` | `/orders` | Place order |
-| `POST` | `/orders/cancel` | Cancel order |
-| `POST` | `/orders/cancel-all` | Cancel all |
+## Kurulum
 
-WebSocket channels: `ticker`, `candle`, `orders`, `fills`
-
-**SDK Alternatives:**
-- `@temple-digital-group/temple-canton-js` — Official Canton JS SDK
-- `@fivenorth/loop-sdk` — Non-custodial wallet trading
-
----
-
-## Setup
-
+### 1. Repoyu klonla
 ```bash
-# 1. Install
-npm install
-
-# 2. Configure
-cp .env.example .env
-# → Fill in TEMPLE_EMAIL and TEMPLE_PASSWORD
-
-# 3. Run (dry-run by default — safe!)
-npm run dev
-
-# 4. Go live when ready
-# In .env: set DRY_RUN=false
-npm start
+git clone https://github.com/CryptoByz/CC-TempleTrade.git
+cd CC-TempleTrade
 ```
 
----
+### 2. Bağımlılıkları kur
+```bash
+npm install
+```
 
-## Strategy
+### 3. .env dosyasını oluştur
+```bash
+cp .env.example .env
+nano .env
+```
 
-**Moving Average Crossover (EMA 9/21)**
+`.env` içine kendi bilgilerini gir:
+```
+TEMPLE_EMAIL=senin@email.com
+TEMPLE_PASSWORD=sifren
+DRY_RUN=true
+TELEGRAM_TOKEN=botfather_dan_alinan_token
+TELEGRAM_CHAT_ID=telegram_chat_id
+```
 
-| Condition | Signal |
-|-----------|--------|
-| EMA(9) crosses above EMA(21) + volume ≥ 1.2× avg + RSI < 65 | **BUY** |
-| EMA(9) crosses below EMA(21) + volume ≥ 1.2× avg + RSI > 35 | **SELL** |
-| All other conditions | **HOLD** |
+> **Telegram Chat ID nasıl bulunur?**
+> Telegram'da `@userinfobot`'a `/start` yaz, Chat ID'ni verir.
 
----
+### 4. Botu başlat
+```bash
+npx ts-node index.ts
+```
 
-## Risk Controls
+## Ayarlar
 
-| Parameter | Default |
-|-----------|---------|
-| Order size | $1,000 |
-| Max total exposure | $50,000 |
-| Stop loss | 2% |
-| Take profit | 4% |
-| Daily loss circuit breaker | $2,000 |
+| Değişken | Açıklama | Varsayılan |
+|----------|----------|------------|
+| `TEMPLE_EMAIL` | Temple hesap emaili | - |
+| `TEMPLE_PASSWORD` | Temple hesap şifresi | - |
+| `DRY_RUN` | `true` = test modu, `false` = canlı | `true` |
+| `TELEGRAM_TOKEN` | Telegram bot token | - |
+| `TELEGRAM_CHAT_ID` | Telegram chat ID | - |
 
----
+## Grid Parametreleri
 
-## Assets on Temple (Canton Network)
+`index.ts` dosyasında `CONFIG` bloğundan değiştirilebilir:
+```typescript
+const CONFIG = {
+  pair:          "CC/USDCx",   // İşlem paritesi
+  gridLevels:    2,             // Her yanda kaç emir (max 2, Temple limiti 5 emir)
+  gridStep:      0.0001,        // Emirler arası fiyat farkı
+  orderQty:      35,            // Her emirde kaç CC
+  checkInterval: 60 * 60 * 1000 // Kontrol sıklığı (ms) — şu an 1 saat
+};
+```
 
-- `BTC-USDCx` — Bitcoin quoted in Canton USDCx stablecoin
-- `ETH-USDCx` — Ethereum quoted in Canton USDCx stablecoin
-- Tokenized equities & commodities (coming 2026)
+## Canlıya Geçiş
 
----
+Test modundan çıkmak için `.env` dosyasında:
+```
+DRY_RUN=false
+```
 
-> **Note:** Temple is an institutional, permissioned venue on Canton Network. You need an approved account at [app.templedigitalgroup.com](https://app.templedigitalgroup.com) to trade live. Always run in `DRY_RUN=true` mode first.
+## Telegram Komutları
+
+| Komut | Açıklama |
+|-------|----------|
+| `/status` | Anlık fiyat ve açık emirleri göster |
+| `/stop` | Botu durdur |
+| `/start` | Botu başlat |
+
+## Notlar
+
+- Temple hesabında maksimum 5 limit emir açılabilir
+- Bot kapatılırken (`CTRL+C`) tüm emirler otomatik iptal edilir
+- `.env` dosyasını asla paylaşma veya GitHub'a yükleme
